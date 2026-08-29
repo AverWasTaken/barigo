@@ -75,6 +75,10 @@ There are about a hundred settings, but here are some fun / interesting / import
 - `allowParkour`
 - `allowParkourPlace`
 - `headHitters` (sprint jump head bonks in 1x2 tunnels, slightly faster than plain sprinting)
+- `sprintJump` (hold sprint jumps on straight flat runs, chains hops with no gaps)
+- `sprintJumpAscend` (sprint jump up ascends, popping over the block while sprinting towards it)
+- `sprintJumpDescend` (sprint jump down slight hills, one or two blocks at a time, instead of stopping at each drop)
+- `sprintJumpOnDiagonals` (sprint jump through straight diagonal runs)
 - `blockPlacementPenalty`
 - `renderCachedChunks` (and `cachedChunksOpacity`) <-- very fun but you need a beefy computer
 - `avoidance` (avoidance of mobs / mob spawners)

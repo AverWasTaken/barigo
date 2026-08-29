@@ -20,6 +20,7 @@ package baritone.behavior;
 import baritone.Baritone;
 import baritone.api.behavior.IPathingBehavior;
 import baritone.api.event.events.*;
+import baritone.api.event.events.type.EventState;
 import baritone.api.pathing.calc.IPath;
 import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalXZ;
@@ -36,6 +37,7 @@ import baritone.pathing.path.PathExecutor;
 import baritone.process.ElytraProcess;
 import baritone.utils.PathRenderer;
 import baritone.utils.PathingCommandContext;
+import baritone.utils.accessor.ILivingEntity;
 import baritone.utils.pathing.Favoring;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -69,6 +71,20 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
     private final Object pathPlanLock = new Object();
 
     private boolean lastAutoJump;
+
+    /**
+     * We just wanna carry the momentum of a sprint jump, so once sprint is on we keep holding it until we land,
+     * even across path segment switches. Dropping and re-engaging sprint mid air kills the speed.
+     */
+    private boolean sprintSticky;
+
+    /**
+     * The sprint jump boost fires along the yaw that jumpFromGround reads. Under freeLook that's the user's
+     * camera and not the direction we're moving, so when a hop fires we override the jump rotation event to
+     * push us along the path instead.
+     */
+    private float sprintJumpYaw;
+    private boolean sprintJumpYawActive;
 
     private BetterBlockPos expectedSegmentStart;
 
@@ -105,12 +121,51 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
         tickPath();
         ticksElapsedSoFar++;
         dispatchEvents();
+        if (event.getState() == EventState.POST) {
+            // the hop yaw armed this tick was consumed by the aiStep that just ran. clear it so a jump
+            // taken after pathing ends never inherits a stale boost direction; the hop chain re-arms it
+            // every tick while it's active
+            sprintJumpYawActive = false;
+        }
     }
 
     @Override
     public void onPlayerSprintState(SprintStateEvent event) {
         if (isPathing()) {
-            event.setState(current.isSprinting());
+            boolean sprinting = current != null && current.isSprinting();
+            if (!sprinting && sprintSticky && !baritone.getPlayerContext().player().isOnGround()) {
+                sprinting = true; // still airborne from a jump, don't drop sprint
+            }
+            sprintSticky = sprinting;
+            event.setState(sprinting);
+        } else {
+            sprintSticky = false;
+        }
+    }
+
+    /**
+     * Redirect vanilla's sprint jump boost (which reads the jump rotation event) along the movement direction.
+     */
+    public void sprintJumpAlong(BlockPos dir) {
+        this.sprintJumpYaw = (float) Math.toDegrees(Math.atan2(-dir.getX(), dir.getZ()));
+        this.sprintJumpYawActive = true;
+        // a bonk shortened hop can land before vanilla's 10 tick jump cooldown expires, which would stall
+        // the next hop in the chain, so clear it whenever we're about to hop
+        ((ILivingEntity) ctx.player()).setNoJumpDelay(0);
+    }
+
+    public void clearSprintJumpYaw() {
+        this.sprintJumpYawActive = false;
+    }
+
+    @Override
+    public void onPlayerRotationMove(RotationMoveEvent event) {
+        if (event.getType() == RotationMoveEvent.Type.JUMP && sprintJumpYawActive) {
+            event.setYaw(sprintJumpYaw);
+            // vanilla drops sprint on the landing collision right before aiStep re-jumps us, which
+            // kills the sprint jump boost exactly when we need it most, so re-assert it here at the
+            // head of jumpFromGround, before the boost reads isSprinting()
+            ctx.player().setSprinting(true);
         }
     }
 
@@ -241,6 +296,11 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
                 case PRE:
                     lastAutoJump = ctx.minecraft().options.autoJump().get();
                     ctx.minecraft().options.autoJump().set(false);
+                    // this runs right after aiStep and right before the sprint state syncs to the server, so
+                    // re-asserting here undoes anything vanilla dropped mid air without the server ever seeing it
+                    if (sprintSticky && !ctx.player().isOnGround() && !ctx.player().isSprinting()) {
+                        ctx.player().setSprinting(true);
+                    }
                     break;
                 case POST:
                     ctx.minecraft().options.autoJump().set(lastAutoJump);

@@ -386,6 +386,30 @@ public final class Settings {
     public final Setting<Boolean> headHitters = new Setting<>(false);
 
     /**
+     * Sprint jump on flat straights for a bit of extra speed. Only hops when the path runs straight ahead
+     * with floor under it, since a sprint jump carries several blocks past the destination.
+     */
+    public final Setting<Boolean> sprintJump = new Setting<>(false);
+
+    /**
+     * Sprint jump up ascends, popping over the block at the right time while sprinting towards it
+     */
+    public final Setting<Boolean> sprintJumpAscend = new Setting<>(false);
+
+    /**
+     * Sprint jump down descends and down slight hills, one or two blocks at a time, instead of stopping at
+     * the edge of every drop. Only when the hill keeps going the same way and the drops stay small enough
+     * to not take fall damage
+     */
+    public final Setting<Boolean> sprintJumpDescend = new Setting<>(false);
+
+    /**
+     * Sprint jump on flat diagonals, but only on stretches of the same diagonal where we won't be turning soon,
+     * since a hop can't steer and the corners along the line need to be open
+     */
+    public final Setting<Boolean> sprintJumpOnDiagonals = new Setting<>(false);
+
+    /**
      * If we overshoot a traverse and end up one block beyond the destination, mark it as successful anyway.
      * <p>
      * This helps with speed exceeding 20m/s

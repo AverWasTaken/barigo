@@ -20,6 +20,7 @@ package baritone.launch.mixins;
 import baritone.api.BaritoneAPI;
 import baritone.api.IBaritone;
 import baritone.api.event.events.RotationMoveEvent;
+import baritone.utils.accessor.ILivingEntity;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
@@ -28,6 +29,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.gen.Accessor;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
@@ -40,7 +42,7 @@ import java.util.Optional;
  * @since 9/10/2018
  */
 @Mixin(LivingEntity.class)
-public abstract class MixinLivingEntity extends Entity {
+public abstract class MixinLivingEntity extends Entity implements ILivingEntity {
 
     /**
      * Event called to override the movement direction when jumping
@@ -50,6 +52,10 @@ public abstract class MixinLivingEntity extends Entity {
 
     @Unique
     private RotationMoveEvent elytraRotationEvent;
+
+    @Accessor("noJumpDelay")
+    @Override
+    public abstract void setNoJumpDelay(int delay);
 
     private MixinLivingEntity(EntityType<?> entityTypeIn, Level worldIn) {
         super(entityTypeIn, worldIn);

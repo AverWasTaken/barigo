@@ -279,9 +279,10 @@ public class MovementDiagonal extends Movement {
             return state;
         }
 
-        if (ctx.playerFeet().equals(dest)) {
+        BlockPos playerFeet = ctx.playerFeet();
+        if (playerFeet.equals(dest) || overshotDest()) {
             return state.setStatus(MovementStatus.SUCCESS);
-        } else if (!playerInValidPosition() && !(MovementHelper.isLiquid(ctx, src) && getValidPositions().contains(ctx.playerFeet().above()))) {
+        } else if (!playerInValidPosition() && !nearDiagonalLine() && !(MovementHelper.isLiquid(ctx, src) && getValidPositions().contains(ctx.playerFeet().above()))) {
             return state.setStatus(MovementStatus.UNREACHABLE);
         }
 
@@ -319,6 +320,37 @@ public class MovementDiagonal extends Movement {
             }
         }
         return true;
+    }
+
+    /**
+     * Sprint jumping (and knockbacks) can carry us past the destination block without our feet ever being in it.
+     * As long as we're still roughly on the diagonal line, count that as a success instead of walking back.
+     */
+    private boolean overshotDest() {
+        if (dest.y != src.y || !Baritone.settings().overshootTraverse.value) {
+            return false;
+        }
+        double offX = ctx.player().position().x - (src.getX() + 0.5D);
+        double offZ = ctx.player().position().z - (src.getZ() + 0.5D);
+        if (offX * getDirection().getX() + offZ * getDirection().getZ() <= 2.0D) {
+            return false; // not past the destination yet, at the dest center this projection is exactly 2
+        }
+        return nearDiagonalLine();
+    }
+
+    /**
+     * A hop gives us no steering, so mid flight our feet can be between the valid positions for a tick or two.
+     * As long as we're still roughly on the diagonal line we'll come back down onto one of them, so don't let
+     * that count as being off the path.
+     */
+    private boolean nearDiagonalLine() {
+        if (dest.y != src.y) {
+            return false;
+        }
+        double offX = ctx.player().position().x - (src.getX() + 0.5D);
+        double offZ = ctx.player().position().z - (src.getZ() + 0.5D);
+        double perp = Math.abs(offX * getDirection().getZ() - offZ * getDirection().getX()) / Math.sqrt((double) getDirection().getX() * getDirection().getX() + (double) getDirection().getZ() * getDirection().getZ());
+        return perp < 0.9;
     }
 
     @Override
