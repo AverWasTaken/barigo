@@ -121,7 +121,12 @@ public class CalculationContext {
             depth = 3;
         }
         float mult = depth / 3.0F;
-        this.waterWalkSpeed = ActionCosts.WALK_ONE_IN_WATER_COST * (1 - mult) + ActionCosts.WALK_ONE_BLOCK_COST * mult;
+        double waterSpeed = ActionCosts.WALK_ONE_IN_WATER_COST * (1 - mult) + ActionCosts.WALK_ONE_BLOCK_COST * mult;
+        if (Baritone.settings().allowSwimming.value && this.canSprint) {
+            // sprint swimming beats wading on the bottom, unless depth strider is good enough to flip that
+            waterSpeed = Math.min(waterSpeed, ActionCosts.SWIM_ONE_BLOCK_COST);
+        }
+        this.waterWalkSpeed = waterSpeed;
         this.breakBlockAdditionalCost = Baritone.settings().blockBreakAdditionalPenalty.value;
         this.backtrackCostFavoringCoefficient = Baritone.settings().backtrackCostFavoringCoefficient.value;
         this.jumpPenalty = Baritone.settings().jumpPenalty.value;

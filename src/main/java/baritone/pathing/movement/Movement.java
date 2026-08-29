@@ -123,8 +123,39 @@ public abstract class Movement implements IMovement, MovementHelper {
     public MovementStatus update() {
         ctx.player().getAbilities().flying = false;
         currentState = updateState(currentState);
-        if (MovementHelper.isLiquid(ctx, ctx.playerFeet()) && ctx.player().position().y < dest.y + 0.6) {
-            currentState.setInput(Input.JUMP, true);
+        if (MovementHelper.isLiquid(ctx, ctx.playerFeet())) {
+            if (shouldSwim()) {
+                // sprint is what enters and keeps the swim state. vanilla only STARTS sprinting from
+                // the key while on the ground or eye-underwater, and actively cancels it at the water
+                // surface (which is exactly where we used to bob), so arm the flag ourselves.
+                // updateSwimming is hooked so the swim state latches the moment we want to dive,
+                // instead of bobbing around waiting for gravity to pull the eye under
+                currentState.setInput(Input.SPRINT, true);
+                ctx.player().setSprinting(true);
+                if (currentState.getStatus() == MovementStatus.RUNNING) {
+                    // pitch is the up/down control while swimming — aim straight at the dest, or
+                    // straight up when the air clock says it's time to breathe (moveRelative is
+                    // yaw-only, so surfacing still makes forward progress)
+                    float aimPitch = RotationUtils.calcRotationFromVec3d(ctx.playerHead(), VecUtils.getBlockPosCenter(dest), ctx.playerRotations()).getPitch();
+                    final float pitch = shouldSurface() ? -90 : aimPitch;
+                    currentState.getTarget().getRotation().ifPresent(rotation ->
+                            currentState.setTarget(new MovementState.MovementTarget(
+                                    rotation.withPitch(pitch),
+                                    false
+                            ))
+                    );
+                    if (pitch < 0) {
+                        // swimming up: vanilla skips the swim-up pull at the surface unless jumping
+                        currentState.setInput(Input.JUMP, true);
+                    }
+                }
+                if (!ctx.player().isSwimming() && ctx.player().isOnGround() && ctx.player().position().y < dest.y + 0.6) {
+                    // fallback: swim state never latched and we're on the bottom — the old bob
+                    currentState.setInput(Input.JUMP, true);
+                }
+            } else if (ctx.player().position().y < dest.y + 0.6) {
+                currentState.setInput(Input.JUMP, true);
+            }
         }
         if (ctx.player().isInWall()) {
             ctx.getSelectedBlock().ifPresent(pos -> MovementHelper.switchToBestToolFor(ctx, BlockStateInterface.get(ctx, pos)));
@@ -148,6 +179,35 @@ public abstract class Movement implements IMovement, MovementHelper {
         }
 
         return currentState.getStatus();
+    }
+
+    /**
+     * Air ticks (of the 300 max) at which we head for the surface mid-swim — 100 leaves 5 seconds of
+     * margin before drowning damage starts, and surfacing from a reasonable depth takes ~1 second
+     */
+    private static final int SURFACE_AT_AIR = 100;
+
+    /**
+     * Holding sprint is what keeps the vanilla swim state alive, so swimming is only on the table when
+     * we're actually in water, sprinting is allowed, and we have the hunger to sprint
+     */
+    private boolean shouldSwim() {
+        return Baritone.settings().allowSwimming.value
+                && ctx.player().isInWater()
+                && Baritone.settings().allowSprint.value
+                && ctx.player().getFoodData().getFoodLevel() > 6;
+    }
+
+    /**
+     * Air is a clock while the eye is underwater: head for the surface once it's running low. And once
+     * we're up, stay up until it's actually refilled — otherwise we'd instantly dive again and just
+     * porpoise on the spot instead of getting a real breath
+     */
+    private boolean shouldSurface() {
+        if (ctx.player().isUnderWater()) {
+            return ctx.player().getAirSupply() < SURFACE_AT_AIR;
+        }
+        return ctx.player().isSwimming() && ctx.player().getAirSupply() < ctx.player().getMaxAirSupply();
     }
 
     protected boolean prepared(MovementState state) {
