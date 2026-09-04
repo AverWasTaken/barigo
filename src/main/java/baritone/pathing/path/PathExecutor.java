@@ -101,6 +101,9 @@ public class PathExecutor implements IPathExecutor, Helper {
      */
     private int sprintGrace;
 
+    private GroundShortcut groundShortcut;
+    private int ticksOnShortcut;
+
     public PathExecutor(PathingBehavior behavior, IPath path) {
         this.behavior = behavior;
         this.ctx = behavior.ctx;
@@ -120,6 +123,9 @@ public class PathExecutor implements IPathExecutor, Helper {
         }
         if (pathPosition >= path.length()) {
             return true; // stop bugging me, I'm done
+        }
+        if (groundShortcut != null) {
+            return tickGroundShortcut();
         }
         Movement movement = (Movement) path.movements().get(pathPosition);
         BetterBlockPos whereAmI = ctx.playerFeet();
@@ -262,6 +268,9 @@ public class PathExecutor implements IPathExecutor, Helper {
             return true;
         } else {
             if (movementStatus == RUNNING) {
+                if (startGroundShortcut(movement, bsi)) {
+                    return tickGroundShortcut();
+                }
                 smoothSteering(movement, bsi);
             }
             sprintNextTick = shouldSprintNextTick();
@@ -284,18 +293,8 @@ public class PathExecutor implements IPathExecutor, Helper {
     }
 
     private void smoothSteering(Movement movement, BlockStateInterface bsi) {
-        if (!Baritone.settings().preferFasterPathing.value || !ctx.player().isOnGround()
-                || ctx.player().isInWater() || ctx.player().onClimbable() || ctx.player().horizontalCollision
-                || movement.isTargetingBlock() || sprintJumpCarry || sprintJumpHolding) {
+        if (!Baritone.settings().preferFasterPathing.value || !canSteerOnGround(movement)) {
             return;
-        }
-        if (!behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.MOVE_FORWARD)) {
-            return;
-        }
-        for (Input input : PRECISE_STEERING_INPUTS) {
-            if (behavior.baritone.getInputOverrideHandler().isInputForcedDown(input)) {
-                return;
-            }
         }
         Vec3 target = PathSmoothing.lookAhead(path.positions(), pathPosition, ctx.player().position(), i -> {
             IMovement next = path.movements().get(i);
@@ -308,8 +307,97 @@ public class PathExecutor implements IPathExecutor, Helper {
         }
     }
 
+    private boolean canSteerOnGround(Movement movement) {
+        if (!ctx.player().isOnGround() || ctx.player().isInWater() || ctx.player().onClimbable()
+                || ctx.player().horizontalCollision || movement.isTargetingBlock()
+                || sprintJumpCarry || sprintJumpHolding
+                || !behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.MOVE_FORWARD)) {
+            return false;
+        }
+        for (Input input : PRECISE_STEERING_INPUTS) {
+            if (behavior.baritone.getInputOverrideHandler().isInputForcedDown(input)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean startGroundShortcut(Movement movement, BlockStateInterface bsi) {
+        if (!Baritone.settings().allowGroundShortcuts.value || !canSteerOnGround(movement)
+                || !movement.safeToCancel() || ctx.player().getBbWidth() > 0.6F
+                || ctx.player().getBbHeight() > 1.8F) {
+            return false;
+        }
+        Map<BlockPos, Boolean> clearance = new HashMap<>();
+        groundShortcut = GroundShortcut.find(path.positions(), pathPosition, ctx.player().position(), i -> {
+            Movement next = (Movement) path.movements().get(i);
+            if (!(next instanceof MovementTraverse || next instanceof MovementDiagonal)) {
+                return false;
+            }
+            next.resetBlockCache();
+            return next.toBreak(bsi).isEmpty() && next.toPlace(bsi).isEmpty() && next.toWalkInto(bsi).isEmpty()
+                    && clearSmoothingColumn(bsi, next.getSrc()) && clearSmoothingColumn(bsi, next.getDest());
+        }, pos -> clearance.computeIfAbsent(pos, p -> clearSmoothingColumn(bsi, p)));
+        ticksOnShortcut = 0;
+        return groundShortcut != null;
+    }
+
+    private boolean tickGroundShortcut() {
+        Vec3 player = ctx.player().position();
+        Vec3 velocity = ctx.player().getDeltaMovement();
+        BlockStateInterface bsi = behavior.baritone.bsi;
+        Map<BlockPos, Boolean> clearance = new HashMap<>();
+        if (!Baritone.settings().allowGroundShortcuts.value || !ctx.player().isOnGround()
+                || ctx.player().isInWater() || ctx.player().onClimbable() || ctx.player().horizontalCollision
+                || !groundShortcut.canContinue(player, velocity,
+                pos -> clearance.computeIfAbsent(pos, p -> clearSmoothingColumn(bsi, p)))) {
+            // we're between the original waypoints. replan from here instead of backtracking toward
+            // a skipped node or handing a diagonal movement a position it cannot execute from.
+            logDebug("Ground shortcut interrupted; recalculating from current position");
+            cancel();
+            return true;
+        }
+        if (groundShortcut.arrived(player, velocity)) {
+            pathPosition = groundShortcut.endIndex;
+            groundShortcut = null;
+            recalcBP = true;
+            onChangeInPathPosition();
+            onTick();
+            return true;
+        }
+        if (++ticksOnShortcut > groundShortcut.start.distanceTo(groundShortcut.target)
+                * ActionCosts.WALK_ONE_BLOCK_COST + Baritone.settings().movementTimeoutTicks.value) {
+            logDebug("Ground shortcut took too long");
+            cancel();
+            return true;
+        }
+        clearKeys();
+        sprintGrace = 0;
+        behavior.clearSprintJumpYaw();
+        Rotation desired = RotationUtils.calcRotationFromVec3d(ctx.playerHead(), groundShortcut.target,
+                ctx.playerRotations()).withPitch(ctx.playerRotations().getPitch());
+        Rotation actual = behavior.baritone.getLookBehavior().getAimProcessor().peekRotation(desired);
+        double yawError = Math.abs(Rotation.normalizeYaw(actual.getYaw() - desired.getYaw()));
+        boolean forward = yawError < 10 && groundShortcut.shouldMoveForward(player, velocity);
+        if (forward) {
+            double yaw = Math.toRadians(actual.getYaw());
+            Vec3 projected = player.add(velocity.x * 2.5 - Math.sin(yaw) * 0.5, 0,
+                    velocity.z * 2.5 + Math.cos(yaw) * 0.5);
+            forward = GroundShortcut.clearSegment(player, projected,
+                    pos -> clearance.computeIfAbsent(pos, p -> clearSmoothingColumn(bsi, p)));
+        }
+        behavior.baritone.getLookBehavior().updateTarget(desired, false);
+        behavior.baritone.getInputOverrideHandler().setInputForceState(Input.MOVE_FORWARD, forward);
+        sprintNextTick = forward && player.distanceTo(groundShortcut.target) > 1.5
+                && Baritone.settings().allowSprint.value && ctx.player().getFoodData().getFoodLevel() > 6;
+        if (!sprintNextTick) {
+            ctx.player().setSprinting(false);
+        }
+        return true; // all ground under our footprint was verified this tick, so pausing is safe
+    }
+
     private boolean clearSmoothingColumn(BlockStateInterface bsi, BlockPos pos) {
-        if (!bsi.worldContainsLoadedChunk(pos.getX(), pos.getZ())) {
+        if (Baritone.settings().pathThroughCachedOnly.value || !bsi.worldContainsLoadedChunk(pos.getX(), pos.getZ())) {
             return false;
         }
         BlockPos floor = pos.below();
@@ -1012,6 +1100,8 @@ public class PathExecutor implements IPathExecutor, Helper {
     }
 
     private void cancel() {
+        groundShortcut = null;
+        sprintNextTick = false;
         clearKeys();
         behavior.baritone.getInputOverrideHandler().getBlockBreakHelper().stopBreakingBlock();
         pathPosition = path.length() + 3;
@@ -1024,6 +1114,9 @@ public class PathExecutor implements IPathExecutor, Helper {
     }
 
     public PathExecutor trySplice(PathExecutor next) {
+        if (groundShortcut != null) {
+            return this; // finish the short ground segment before replacing its executor and indices
+        }
         if (next == null) {
             return cutIfTooLong();
         }

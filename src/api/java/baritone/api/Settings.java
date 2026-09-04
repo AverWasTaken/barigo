@@ -426,6 +426,15 @@ public final class Settings {
     public final Setting<Boolean> preferFasterPathing = new Setting<>(true);
 
     /**
+     * Take direct ground routes across bends in flat walking paths, instead of visiting every block center.
+     * <p>
+     * Only uses loaded terrain with clear body space and full solid support across the player's width.
+     * Jumps, climbs, block interactions, and hazardous or slippery terrain retain their normal movements.
+     * Rechecks the route each tick and replans if it becomes obstructed. Enabled by default.
+     */
+    public final Setting<Boolean> allowGroundShortcuts = new Setting<>(true);
+
+    /**
      * When breaking blocks for a movement, wait until all falling blocks have settled before continuing
      */
     public final Setting<Boolean> pauseMiningForFallingBlocks = new Setting<>(true);

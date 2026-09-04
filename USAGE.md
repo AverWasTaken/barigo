@@ -72,6 +72,7 @@ There are about a hundred settings, but here are some fun / interesting / import
 - `allowBreak`
 - `allowSprint`
 - `preferFasterPathing` (enabled by default: smoother steering along clear straight runs and fewer awkward corner-edging shortcuts; toggle with `#preferFasterPathing true` / `false`)
+- `allowGroundShortcuts` (enabled by default: take direct lines across bends in flat walking paths, with full-width clearance and floor checks every tick; toggle with `#allowGroundShortcuts true` / `false`)
 - `allowPlace`
 - `allowParkour`
 - `allowParkourPlace`
