@@ -28,6 +28,7 @@ import baritone.utils.BlockStateInterface;
 import java.util.*;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.phys.AABB;
 
@@ -123,38 +124,32 @@ public abstract class Movement implements IMovement, MovementHelper {
     public MovementStatus update() {
         ctx.player().getAbilities().flying = false;
         currentState = updateState(currentState);
-        if (MovementHelper.isLiquid(ctx, ctx.playerFeet())) {
+        if (MovementHelper.isLiquid(ctx, ctx.playerFeet()) || ctx.player().isInWater()) {
             if (shouldSwim()) {
                 // sprint is what enters and keeps the swim state. vanilla only STARTS sprinting from
                 // the key while on the ground or eye-underwater, and actively cancels it at the water
                 // surface (which is exactly where we used to bob), so arm the flag ourselves.
-                // updateSwimming is hooked so the swim state latches the moment we want to dive,
-                // instead of bobbing around waiting for gravity to pull the eye under
+                // MixinEntity.allowSwimStart then latches the swim state this same tick instead of
+                // waiting for gravity to pull the eye under
                 currentState.setInput(Input.SPRINT, true);
                 ctx.player().setSprinting(true);
-                if (currentState.getStatus() == MovementStatus.RUNNING) {
-                    // pitch is the up/down control while swimming — aim straight at the dest, or
-                    // straight up when the air clock says it's time to breathe (moveRelative is
-                    // yaw-only, so surfacing still makes forward progress)
-                    float aimPitch = RotationUtils.calcRotationFromVec3d(ctx.playerHead(), VecUtils.getBlockPosCenter(dest), ctx.playerRotations()).getPitch();
-                    final float pitch = shouldSurface() ? -90 : aimPitch;
-                    currentState.getTarget().getRotation().ifPresent(rotation ->
-                            currentState.setTarget(new MovementState.MovementTarget(
-                                    rotation.withPitch(pitch),
-                                    false
-                            ))
-                    );
-                    if (pitch < 0) {
-                        // swimming up: vanilla skips the swim-up pull at the surface unless jumping
-                        currentState.setInput(Input.JUMP, true);
-                    }
-                }
-                if (!ctx.player().isSwimming() && ctx.player().isOnGround() && ctx.player().position().y < dest.y + 0.6) {
-                    // fallback: swim state never latched and we're on the bottom — the old bob
+                if (currentState.getStatus() == MovementStatus.RUNNING && ctx.player().isSwimming() && !ctx.player().isOnGround()) {
+                    holdWaterline();
+                } else if (!ctx.player().isSwimming() && ctx.player().isOnGround() && ctx.player().position().y < dest.y + 0.6) {
+                    // swim state hasn't latched yet and we're on the bottom: the old bob, for one tick
                     currentState.setInput(Input.JUMP, true);
                 }
-            } else if (ctx.player().position().y < dest.y + 0.6) {
-                currentState.setInput(Input.JUMP, true);
+            } else {
+                if (Baritone.settings().allowSwimming.value && ctx.player().isSwimming()) {
+                    // standing up to breathe (see shouldSwim). sprintInWater is on by default and traverse
+                    // requests sprint every tick, which would keep us crawling along the bottom with our
+                    // head under, so drop it explicitly
+                    currentState.setInput(Input.SPRINT, false);
+                    ctx.player().setSprinting(false);
+                }
+                if (ctx.player().position().y < dest.y + 0.6) {
+                    currentState.setInput(Input.JUMP, true);
+                }
             }
         }
         if (ctx.player().isInWall()) {
@@ -182,32 +177,119 @@ public abstract class Movement implements IMovement, MovementHelper {
     }
 
     /**
-     * Air ticks (of the 300 max) at which we head for the surface mid-swim — 100 leaves 5 seconds of
-     * margin before drowning damage starts, and surfacing from a reasonable depth takes ~1 second
+     * Where the feet sit below the water surface while swimming along it. The swim pose puts the eye 0.4
+     * above the feet and vanilla checks the eye 1/9 below where it really is, so the eye is out of the water
+     * (air refills) at any depth below 0.289; the body stays in water (swim state and sprint speed hold)
+     * at any depth above 0. This is the middle of that band: head out, shoulders in, as much margin as
+     * possible each way
+     */
+    private static final double WATERLINE_DEPTH = 0.15;
+
+    /**
+     * How far above a destination's block the feet aim when that would be higher than the waterline, i.e.
+     * climbing out onto land. Below the waterline (a destination on the water itself, or a shore at the
+     * same level that step assist handles) the waterline wins
+     */
+    private static final double DEST_CLEARANCE = 0.3;
+
+    /**
+     * Air ticks (of the 300 max) at which a swimmer crawling along the bottom of shallow water stands up to
+     * breathe: 5 seconds of margin before drowning damage starts
      */
     private static final int SURFACE_AT_AIR = 100;
+
+    // vanilla swim physics per tick, from LivingEntity.jumpInLiquid, Player.travel and LivingEntity.travel:
+    // holding jump adds SWIM_JUMP_BOOST, then vertical speed is pulled toward the look vector's y by
+    // SWIM_PULL (SWIM_PULL_STEEP when looking down steeper than SWIM_STEEP_LOOK), then it's scaled by
+    // WATER_DRAG_Y. sprinting in water has no gravity at all, which is why swimmers float
+    private static final double SWIM_JUMP_BOOST = 0.04;
+    private static final double SWIM_PULL = 0.06;
+    private static final double SWIM_PULL_STEEP = 0.085;
+    private static final double SWIM_STEEP_LOOK = -0.2;
+    private static final double WATER_DRAG_Y = 0.8;
+
+    /**
+     * Wanted vertical speed per block of height error, and per unit of current vertical speed (damping).
+     * Tuned against the vanilla numbers above: no overshoot from any depth, settles within a second, and a
+     * couple of degrees of random look offset moves the waterline by about a hundredth of a block
+     */
+    private static final double WATERLINE_GAIN = 0.3;
+    private static final double WATERLINE_DAMPING = 0.9;
 
     /**
      * Holding sprint is what keeps the vanilla swim state alive, so swimming is only on the table when
      * we're actually in water, sprinting is allowed, and we have the hunger to sprint
      */
     private boolean shouldSwim() {
-        return Baritone.settings().allowSwimming.value
-                && ctx.player().isInWater()
-                && Baritone.settings().allowSprint.value
-                && ctx.player().getFoodData().getFoodLevel() > 6;
+        if (!Baritone.settings().allowSwimming.value
+                || !ctx.player().isInWater()
+                || !Baritone.settings().allowSprint.value
+                || ctx.player().getFoodData().getFoodLevel() <= 6) {
+            return false;
+        }
+        if (!ctx.player().isOnGround()) {
+            // floating: holdWaterline keeps the eye out, so air is never a problem out here
+            return true;
+        }
+        // shallow water: the swim pose crawls along the bottom with the eye under, so air is a clock.
+        // crawl until it runs low, then stand up (which is what surfaces us here, pitch can't) and stay
+        // standing until it's actually full, otherwise we'd get one tick of air and go right back under.
+        // a swimmer just brushing the bottom at the shore keeps swimming, its eye is already out
+        int air = ctx.player().getAirSupply();
+        if (ctx.player().isUnderWater()) {
+            return air >= SURFACE_AT_AIR;
+        }
+        return ctx.player().isSwimming() || air >= ctx.player().getMaxAirSupply();
     }
 
     /**
-     * Air is a clock while the eye is underwater: head for the surface once it's running low. And once
-     * we're up, stay up until it's actually refilled — otherwise we'd instantly dive again and just
-     * porpoise on the spot instead of getting a real breath
+     * Sit exactly on the waterline while swimming: head in the air so we never drown, body in the water
+     * so we keep the swim state and its sprint speed.
+     * <p>
+     * The trick is that with jump held, vanilla's vertical speed settles at a value set purely by the
+     * look pitch (about 25 degrees down hovers, level rises, steeper down sinks), so pitch is a smooth
+     * throttle instead of the on/off jump key. Cutting the jump key at a depth band is what used to
+     * launch us out of the water and bob us back in: the momentum after a jump assisted rise carries four
+     * times the last tick's speed
      */
-    private boolean shouldSurface() {
-        if (ctx.player().isUnderWater()) {
-            return ctx.player().getAirSupply() < SURFACE_AT_AIR;
+    private void holdWaterline() {
+        double feetY = ctx.player().position().y;
+        double surfaceY = feetY + ctx.player().getFluidHeight(FluidTags.WATER);
+        // the waterline, unless the movement is taking us higher (climbing out onto land)
+        double targetY = Math.max(surfaceY - WATERLINE_DEPTH, dest.y + DEST_CLEARANCE);
+        double wanted = WATERLINE_GAIN * (targetY - feetY) - WATERLINE_DAMPING * ctx.player().getDeltaMovement().y;
+        float pitch = pitchForSwimVelocity(wanted);
+        if (pitch == ctx.playerRotations().getPitch()) {
+            // same convention as RotationUtils.reachable: equal to the current pitch means "don't care"
+            pitch += 0.0001F;
         }
-        return ctx.player().isSwimming() && ctx.player().getAirSupply() < ctx.player().getMaxAirSupply();
+        final float swimPitch = pitch;
+        currentState.getTarget().getRotation().ifPresent(rotation ->
+                currentState.setTarget(new MovementState.MovementTarget(rotation.withPitch(swimPitch), false))
+        );
+        currentState.setInput(Input.JUMP, true);
+    }
+
+    /**
+     * The pitch that, with jump held, makes vanilla settle at the given vertical speed. Clamped to
+     * straight up / straight down, which is about +0.31 / -0.14 blocks per tick
+     */
+    private static float pitchForSwimVelocity(double velocity) {
+        double look = lookForSwimVelocity(velocity, SWIM_PULL);
+        if (look < SWIM_STEEP_LOOK) {
+            // the stronger pull kicks in past this look, so the map is piecewise (and has a small gap
+            // right at the threshold, which just pins to the threshold)
+            look = Math.min(SWIM_STEEP_LOOK, lookForSwimVelocity(velocity, SWIM_PULL_STEEP));
+        }
+        look = Math.max(-1, Math.min(1, look));
+        // look vector y is -sin(pitch)
+        return (float) -Math.toDegrees(Math.asin(look));
+    }
+
+    private static double lookForSwimVelocity(double velocity, double pull) {
+        // steady state of v = drag * ((1 - pull) * (v + boost) + pull * look), solved for look
+        double carry = WATER_DRAG_Y * (1 - pull);
+        return (velocity * (1 - carry) - carry * SWIM_JUMP_BOOST) / (WATER_DRAG_Y * pull);
     }
 
     protected boolean prepared(MovementState state) {

@@ -620,7 +620,7 @@ public class PathExecutor implements IPathExecutor, Helper {
         if (requireOnGround && !ctx.player().isOnGround()) {
             return false;
         }
-        if (ctx.player().onClimbable() || MovementHelper.isLiquid(ctx, ctx.playerFeet())) {
+        if (ctx.player().onClimbable() || MovementHelper.isLiquid(ctx, ctx.playerFeet()) || ctx.player().isInWater()) {
             return false; // hopping in water or on a vine just sticks us to it instead
         }
         Block below = ctx.world().getBlockState(ctx.playerFeet().below()).getBlock();

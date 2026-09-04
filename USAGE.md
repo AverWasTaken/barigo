@@ -79,7 +79,7 @@ There are about a hundred settings, but here are some fun / interesting / import
 - `sprintJumpAscend` (sprint jump up ascends, popping over the block while sprinting towards it)
 - `sprintJumpDescend` (sprint jump down slight hills, one or two blocks at a time, instead of stopping at each drop)
 - `sprintJumpOnDiagonals` (sprint jump through straight diagonal runs)
-- `allowSwimming` (swim through water instead of bobbing along the bottom)
+- `allowSwimming` (sprint swim along the waterline, head out and body in, instead of bobbing through water)
 - `blockPlacementPenalty`
 - `renderCachedChunks` (and `cachedChunksOpacity`) <-- very fun but you need a beefy computer
 - `avoidance` (avoidance of mobs / mob spawners)
