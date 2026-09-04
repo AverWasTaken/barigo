@@ -382,12 +382,14 @@ public final class Settings {
      * Sprint jump in 1x2 corridors and whenever walking under a low ceiling, bonking our head on it.
      * <p>
      * The sprint jump speed boost applies before we hit the ceiling, making this faster than just sprinting.
+     * Requires a continuous full ceiling, supported runway, and enough room before the next turn or goal.
      */
     public final Setting<Boolean> headHitters = new Setting<>(false);
 
     /**
-     * Sprint jump on flat straights for a bit of extra speed. Only hops when the path runs straight ahead
-     * with floor under it, since a sprint jump carries several blocks past the destination.
+     * Sprint jump on flat straights, holding jump and forward steering throughout each flight.
+     * Checks a supported runway based on current speed before every takeoff, including room to slow down
+     * before turns and goals. Unusual terrain or effects that change jump height or gravity use normal movement.
      */
     public final Setting<Boolean> sprintJump = new Setting<>(false);
 
@@ -397,15 +399,15 @@ public final class Settings {
     public final Setting<Boolean> sprintJumpAscend = new Setting<>(false);
 
     /**
-     * Sprint jump down descends and down slight hills, one or two blocks at a time, instead of stopping at
-     * the edge of every drop. Only when the hill keeps going the same way and the drops stay small enough
-     * to not take fall damage
+     * Sprint jump down slight hills when the path keeps going straight with supported landing space.
+     * Allows at most one block of total drop in the checked runway: adding a jump to a two-block drop
+     * can cause fall damage. Deeper descents use normal movement.
      */
     public final Setting<Boolean> sprintJumpDescend = new Setting<>(false);
 
     /**
-     * Sprint jump on flat diagonals, but only on stretches of the same diagonal where we won't be turning soon,
-     * since a hop can't steer and the corners along the line need to be open
+     * Sprint jump on flat diagonals with the same speed-dependent runway checks as straight jumps.
+     * Checks both diagonal corners, support, and clearance across the full jump height before each takeoff.
      */
     public final Setting<Boolean> sprintJumpOnDiagonals = new Setting<>(false);
 

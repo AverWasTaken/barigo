@@ -119,15 +119,19 @@ final class GroundShortcut {
     // exact segment-versus-expanded-cell intersections, not a ray or samples that can miss a corner.
     // every cell touched by the player's swept footprint must have both clearance and full support.
     static boolean clearSegment(Vec3 from, Vec3 to, Predicate<BlockPos> clearColumn) {
+        return clearSegment(from, to, HALF_WIDTH, clearColumn);
+    }
+
+    static boolean clearSegment(Vec3 from, Vec3 to, double halfWidth, Predicate<BlockPos> clearColumn) {
         if (Math.abs(from.y - to.y) > 0.05 || from.distanceToSqr(to) > 256) {
             return false;
         }
         int y = (int) Math.floor(from.y + 0.05);
-        for (int x = (int) Math.floor(Math.min(from.x, to.x) - HALF_WIDTH);
-             x <= (int) Math.floor(Math.max(from.x, to.x) + HALF_WIDTH); x++) {
-            for (int z = (int) Math.floor(Math.min(from.z, to.z) - HALF_WIDTH);
-                 z <= (int) Math.floor(Math.max(from.z, to.z) + HALF_WIDTH); z++) {
-                if (intersectsCell(from, to, x, z) && !clearColumn.test(new BlockPos(x, y, z))) {
+        for (int x = (int) Math.floor(Math.min(from.x, to.x) - halfWidth);
+             x <= (int) Math.floor(Math.max(from.x, to.x) + halfWidth); x++) {
+            for (int z = (int) Math.floor(Math.min(from.z, to.z) - halfWidth);
+                 z <= (int) Math.floor(Math.max(from.z, to.z) + halfWidth); z++) {
+                if (intersectsCell(from, to, x, z, halfWidth) && !clearColumn.test(new BlockPos(x, y, z))) {
                     return false;
                 }
             }
@@ -135,13 +139,13 @@ final class GroundShortcut {
         return true;
     }
 
-    private static boolean intersectsCell(Vec3 from, Vec3 to, int x, int z) {
+    private static boolean intersectsCell(Vec3 from, Vec3 to, int x, int z, double halfWidth) {
         double dx = to.x - from.x;
         double dz = to.z - from.z;
-        double minX = x - HALF_WIDTH;
-        double maxX = x + 1 + HALF_WIDTH;
-        double minZ = z - HALF_WIDTH;
-        double maxZ = z + 1 + HALF_WIDTH;
+        double minX = x - halfWidth;
+        double maxX = x + 1 + halfWidth;
+        double minZ = z - halfWidth;
+        double maxZ = z + 1 + halfWidth;
         if (dx == 0 && (from.x < minX || from.x > maxX)
                 || dz == 0 && (from.z < minZ || from.z > maxZ)) {
             return false;

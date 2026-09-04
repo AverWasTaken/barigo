@@ -77,9 +77,9 @@ There are about a hundred settings, but here are some fun / interesting / import
 - `allowParkour`
 - `allowParkourPlace`
 - `headHitters` (sprint jump head bonks in 1x2 tunnels, slightly faster than plain sprinting)
-- `sprintJump` (hold sprint jumps on straight flat runs, chains hops with no gaps)
+- `sprintJump` (continuous sprint jumps on straight flat runs, with speed-dependent runway checks before each takeoff)
 - `sprintJumpAscend` (sprint jump up ascends, popping over the block while sprinting towards it)
-- `sprintJumpDescend` (sprint jump down slight hills, one or two blocks at a time, instead of stopping at each drop)
+- `sprintJumpDescend` (sprint jump down straight gentle slopes, allowing at most one block of total drop per checked runway)
 - `sprintJumpOnDiagonals` (sprint jump through straight diagonal runs)
 - `allowSwimming` (sprint swim along the waterline, head out and body in, instead of bobbing through water)
 - `blockPlacementPenalty`

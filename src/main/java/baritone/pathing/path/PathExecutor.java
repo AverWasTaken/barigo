@@ -36,6 +36,8 @@ import baritone.utils.BlockStateInterface;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
 import net.minecraft.util.Tuple;
+import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -82,24 +84,8 @@ public class PathExecutor implements IPathExecutor, Helper {
 
     private boolean sprintNextTick;
 
-    /**
-     * We just forced a sprint jump and are airborne because of it, so keep sprint held until we land.
-     * Engaging or dropping sprint mid air loses the momentum the jump was for.
-     */
-    private boolean sprintJumpCarry;
-
-    /**
-     * We just wanna carry the momentum from a sprint jump, so keep holding the jump key through the whole flight,
-     * same as a player just holding space. Pulsing the key per hop fires the double space fly toggle attempt and
-     * hitches mid air, and holding it means the landing chains straight into the next jump.
-     */
-    private boolean sprintJumpHolding;
-
-    /**
-     * Ticks left to keep holding sprint through a movement switchover, dropping and re-engaging sprint every few
-     * ticks is what makes the speed look janky.
-     */
-    private int sprintGrace;
+    // keep the launch direction, not the direction of whichever waypoint we cross while airborne
+    private final SprintJumpFlight sprintJump;
 
     private GroundShortcut groundShortcut;
     private int ticksOnShortcut;
@@ -109,6 +95,8 @@ public class PathExecutor implements IPathExecutor, Helper {
         this.ctx = behavior.ctx;
         this.path = path;
         this.pathPosition = 0;
+        this.sprintJump = new SprintJumpFlight(behavior.baritone.getInputOverrideHandler()::setInputForceState,
+                rotation -> behavior.baritone.getLookBehavior().updateTarget(rotation, false), behavior::sprintJumpAlong);
     }
 
     /**
@@ -223,7 +211,7 @@ public class PathExecutor implements IPathExecutor, Helper {
                 return true;
             }
         }
-        boolean canCancel = movement.safeToCancel();
+        boolean canCancel = movement.safeToCancel() && (!sprintJump.active() || ctx.player().isOnGround());
         if (costEstimateIndex == null || costEstimateIndex != pathPosition) {
             costEstimateIndex = pathPosition;
             // do this only once, when the movement starts, and deliberately get the cost as cached when this path was calculated, not the cost as it is right now
@@ -264,8 +252,8 @@ public class PathExecutor implements IPathExecutor, Helper {
             //System.out.println("Movement done, next path");
             pathPosition++;
             onChangeInPathPosition();
-            onTick();
-            return true;
+            boolean safe = onTick();
+            return safe && !sprintJump.active();
         } else {
             if (movementStatus == RUNNING) {
                 if (startGroundShortcut(movement, bsi)) {
@@ -289,7 +277,7 @@ public class PathExecutor implements IPathExecutor, Helper {
                 return true;
             }
         }
-        return canCancel; // movement is in progress, but if it reports cancellable, PathingBehavior is good to cut onto the next path
+        return canCancel && !sprintJump.active(); // don't pause or splice a hop between its waypoints
     }
 
     private void smoothSteering(Movement movement, BlockStateInterface bsi) {
@@ -310,7 +298,7 @@ public class PathExecutor implements IPathExecutor, Helper {
     private boolean canSteerOnGround(Movement movement) {
         if (!ctx.player().isOnGround() || ctx.player().isInWater() || ctx.player().onClimbable()
                 || ctx.player().horizontalCollision || movement.isTargetingBlock()
-                || sprintJumpCarry || sprintJumpHolding
+                || sprintJump.active()
                 || !behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.MOVE_FORWARD)) {
             return false;
         }
@@ -325,7 +313,7 @@ public class PathExecutor implements IPathExecutor, Helper {
     private boolean startGroundShortcut(Movement movement, BlockStateInterface bsi) {
         if (!Baritone.settings().allowGroundShortcuts.value || !canSteerOnGround(movement)
                 || !movement.safeToCancel() || ctx.player().getBbWidth() > 0.6F
-                || ctx.player().getBbHeight() > 1.8F) {
+                || ctx.player().getBbHeight() > 1.8F || findSprintJump(movement) != null) {
             return false;
         }
         Map<BlockPos, Boolean> clearance = new HashMap<>();
@@ -372,7 +360,6 @@ public class PathExecutor implements IPathExecutor, Helper {
             return true;
         }
         clearKeys();
-        sprintGrace = 0;
         behavior.clearSprintJumpYaw();
         Rotation desired = RotationUtils.calcRotationFromVec3d(ctx.playerHead(), groundShortcut.target,
                 ctx.playerRotations()).withPitch(ctx.playerRotations().getPitch());
@@ -517,67 +504,27 @@ public class PathExecutor implements IPathExecutor, Helper {
         // we'll take it from here, no need for minecraft to see we're holding down control and sprint for us
         behavior.baritone.getInputOverrideHandler().setInputForceState(Input.SPRINT, false);
 
-        // first and foremost, if allowSprint is off, or if we don't have enough hunger, don't try and sprint
-        if (!new CalculationContext(behavior.baritone, false).canSprint) {
+        if (!Baritone.settings().allowSprint.value || ctx.player().getFoodData().getFoodLevel() <= 6) {
+            endSprintJump();
             return false;
         }
 
-        // hold W while a hop is in flight or being held: the movement we're ticking already has its dest
-        // behind us by now, so its steering would backpedal mid air and bleed the momentum, and vanilla
-        // kills sprint the instant forward impulse drops
-        if (sprintJumpCarry || sprintJumpHolding) {
-            behavior.baritone.getInputOverrideHandler().setInputForceState(Input.MOVE_FORWARD, true);
-        }
-
-        // we just wanna carry the momentum from our sprint jump, don't drop and re-engage sprint mid air
-        if (sprintJumpCarry) {
-            if (!ctx.player().isOnGround()) {
-                return true;
-            }
-            sprintJumpCarry = false;
-        }
-
         IMovement current = path.movements().get(pathPosition);
-
-        // hold space through an active hop chain: jump, land, jump again, with no gap between hops.
-        // this runs before the sprint grace and regardless of the sprint request, because the movement's
-        // own state machine drops its sprint request for a few ticks right after we overshoot its dest
-        // mid hop, and pulsing the jump key there is exactly the jump wait jump wait this avoids
-        if (sprintJumpHolding) {
-            BlockPos dir = current.getDirection();
-            boolean hopHere = false;
-            // the window is 6 movements because pathPosition lags us by up to 3 mid chain, and a boosted
-            // hop still carries ~4 blocks past wherever we are. without the slack we'd launch the last
-            // hop of a hill straight over the turn at the bottom and land off path
-            if (current instanceof MovementTraverse && dir.getY() == 0 && Baritone.settings().sprintJump.value && canContinueHopChain(current)) {
-                // with sprintJumpDescend on, a flat chain may step down a block or two at a time, so a hill
-                // doesn't end the hop chain and make us stop at the edge of every drop
-                hopHere = Baritone.settings().sprintJumpDescend.value
-                        ? downhillChainAhead(dir, 6) && floorAheadDownhill(6)
-                        : straightChainAhead(dir, 6, MovementTraverse.class) && floorAhead(current.getDest(), dir, 6);
-            } else if (current instanceof MovementDiagonal && dir.getY() == 0 && Baritone.settings().sprintJumpOnDiagonals.value && canContinueHopChain(current)) {
-                hopHere = straightChainAhead(dir, 6, MovementDiagonal.class);
-            } else if (current instanceof MovementDescend && dir.getY() >= -2 && Baritone.settings().sprintJumpDescend.value && canContinueHopChain(current)) {
-                hopHere = downhillChainAhead(dir, 6) && floorAheadDownhill(6);
-            }
-            if (hopHere) {
-                behavior.baritone.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
-                behavior.sprintJumpAlong(dir);
-                lookAlongHop(dir);
-                return true;
-            }
-            sprintJumpHolding = false; // the straight run is over, back to normal movement decisions
-            behavior.clearSprintJumpYaw();
+        boolean controlAllowed = !ctx.player().isInWater() && !ctx.player().onClimbable()
+                && !ctx.player().horizontalCollision && !((Movement) current).isTargetingBlock() && !hasInteractionInput();
+        if (sprintJump.continueFlight(!ctx.player().isOnGround(), controlAllowed, ctx.playerRotations().getPitch())) {
+            return true;
         }
+        behavior.clearSprintJumpYaw();
 
-        // hold sprint through the small gaps where movements switch over and nothing has asked for it yet
-        if (sprintGrace > 0) {
-            sprintGrace--;
+        // every landing gets the same checks as the first launch, before ordinary sprint policy.
+        if (trySprintJump(current)) {
             return true;
         }
 
         // traverse requests sprinting, so we need to do this check first
-        if (current instanceof MovementTraverse && pathPosition < path.length() - 3) {
+        if (current instanceof MovementTraverse && ctx.player().isOnGround() && !hasInteractionInput()
+                && pathPosition < path.length() - 3) {
             IMovement next = path.movements().get(pathPosition + 1);
             if (next instanceof MovementAscend && sprintableAscend(ctx, (MovementTraverse) current, (MovementAscend) next, path.movements().get(pathPosition + 2))) {
                 if (skipNow(ctx, current)) {
@@ -585,9 +532,11 @@ public class PathExecutor implements IPathExecutor, Helper {
                     pathPosition++;
                     onChangeInPathPosition();
                     onTick();
+                    if (failed() || finished()) {
+                        return false;
+                    }
                     behavior.baritone.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
-                    sprintJumpCarry = true;
-                    behavior.sprintJumpAlong(next.getDirection());
+                    sprintJump.start(next.getDirection(), ctx.playerRotations().getPitch());
                     return true;
                 } else {
                     logDebug("Too far to the side to safely sprint ascend");
@@ -597,18 +546,6 @@ public class PathExecutor implements IPathExecutor, Helper {
 
         // if the movement requested sprinting, then we're done
         if (requested) {
-            sprintGrace = 3;
-            if (canSprintJump(current)) {
-                if (Baritone.settings().headHitters.value) {
-                    headHitJump(current);
-                }
-                if (Baritone.settings().sprintJump.value) {
-                    sprintJumpFlat(current);
-                }
-            }
-            if (Baritone.settings().sprintJumpOnDiagonals.value && canSprintJumpDiagonal(current)) {
-                sprintJumpDiagonal(current);
-            }
             return true;
         }
 
@@ -659,9 +596,6 @@ public class PathExecutor implements IPathExecutor, Helper {
                             return false;
                         }
 
-                    }
-                    if (Baritone.settings().sprintJumpDescend.value) {
-                        sprintJumpOffDescend(current);
                     }
                     if (ctx.playerFeet().equals(current.getDest())) {
                         pathPosition++;
@@ -726,264 +660,103 @@ public class PathExecutor implements IPathExecutor, Helper {
         return false;
     }
 
-    /**
-     * Sprint jump into a low ceiling (1x2 corridors, overhangs, etc.) for a bit of extra speed.
-     * The sprint jump boost applies on the first ticks of the jump, before we bonk our head on the ceiling.
-     * This runs after movement.update() has cleared and reasserted the forced inputs,
-     * so a jump forced here lasts exactly one tick.
-     */
-    private void headHitJump(IMovement current) {
-        if (!alignedToMove(current) || !underHeadBonkCeiling(current.getDirection(), ctx.playerFeet()) || !clearOfLedgesAhead(current, current.getDirection())) {
-            return;
+    private boolean trySprintJump(IMovement current) {
+        Vec3 velocity = ctx.player().getDeltaMovement();
+        if (Math.hypot(velocity.x, velocity.z) < 0.08) {
+            return false; // reserve the runway while walking up to speed, then take off
         }
-        behavior.baritone.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
-        behavior.sprintJumpAlong(current.getDirection());
-    }
-
-    private boolean canSprintJump(IMovement current) {
-        return current instanceof MovementTraverse
-                && current.getDirection().getY() == 0
-                && canSprintJumpCommon(current);
-    }
-
-    private boolean canSprintJumpDiagonal(IMovement current) {
-        return current instanceof MovementDiagonal
-                && current.getDirection().getY() == 0
-                && canSprintJumpCommon(current);
-    }
-
-    private boolean canSprintJumpCommon(IMovement current) {
-        return hopSafe(current, true);
-    }
-
-    private boolean canContinueHopChain(IMovement current) {
-        // same rules as canSprintJumpCommon, but being off the ground is expected mid chain
-        return hopSafe(current, false);
-    }
-
-    private boolean hopSafe(IMovement current, boolean requireOnGround) {
-        if (requireOnGround && !ctx.player().isOnGround()) {
+        SprintJumpPlan plan = findSprintJump(current);
+        if (plan == null) {
             return false;
         }
-        if (ctx.player().onClimbable() || MovementHelper.isLiquid(ctx, ctx.playerFeet()) || ctx.player().isInWater()) {
-            return false; // hopping in water or on a vine just sticks us to it instead
-        }
-        Block below = ctx.world().getBlockState(ctx.playerFeet().below()).getBlock();
-        if (below == Blocks.ICE || below == Blocks.PACKED_ICE || below == Blocks.BLUE_ICE || below == Blocks.SLIME_BLOCK) {
-            return false; // low friction slides us way past the stretch of path we verified before hopping
-        }
-        if (((Movement) current).toBreakCached == null || !((Movement) current).toBreakCached.isEmpty()) {
-            return false; // breaking is like 5x slower when you're jumping
-        }
-        // not while sneaking either, e.g. walking on magma, a jump would break the sneak and the edge safety with it
-        return !behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.SNEAK);
-    }
-
-    private boolean alignedToMove(IMovement current) {
-        // don't hop right after a diagonal: the leftover sideways momentum and being off center would drift us
-        // off the line mid air, so wait until we're moving straight again
-        BlockPos dir = current.getDirection();
-        double velX = ctx.player().getDeltaMovement().x;
-        double velZ = ctx.player().getDeltaMovement().z;
-        double lateralMotion = Math.abs(velX * dir.getZ() - velZ * dir.getX());
-        if (lateralMotion > 0.1) {
-            return false; // same idea as the lateral motion check in MovementAscend, but direction-aware
-        }
-        double offX = ctx.player().position().x - (current.getSrc().getX() + 0.5D);
-        double offZ = ctx.player().position().z - (current.getSrc().getZ() + 0.5D);
-        double offTarget = Math.abs(offX * dir.getZ() - offZ * dir.getX()) / Math.sqrt((double) dir.getX() * dir.getX() + (double) dir.getZ() * dir.getZ());
-        return offTarget <= 0.1; // same idea as skipNow, works for diagonals too since it's a real cross product
-    }
-
-    private void sprintJumpFlat(IMovement current) {
-        BlockPos dir = current.getDirection();
-        // a sprint jump carries several blocks, so only hop when the path runs straight ahead with floor
-        // under it. with sprintJumpDescend on, the straight run may step down a block or two at a time
-        boolean downhillOk = Baritone.settings().sprintJumpDescend.value;
-        if (!alignedToMove(current) || !headroomForJump(dir, ctx.playerFeet(), 4) || !Baritone.settings().overshootTraverse.value
-                || !(straightChainAhead(dir, 5, MovementTraverse.class) || downhillOk && downhillChainAhead(dir, 5))
-                || !(floorAhead(current.getDest(), dir, 6) || downhillOk && floorAheadDownhill(6))) {
-            return;
-        }
-        behavior.baritone.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
-        behavior.sprintJumpAlong(dir);
-        lookAlongHop(dir);
-        sprintJumpCarry = true;
-        sprintJumpHolding = true;
-    }
-
-    private void sprintJumpDiagonal(IMovement current) {
-        BlockPos dir = current.getDirection();
-        // a sprint jump carries several blocks, so only hop when the diagonal runs straight ahead with floor under it
-        if (!alignedToMove(current) || !headroomForJump(dir, ctx.playerFeet(), 3) || !straightChainAhead(dir, 3, MovementDiagonal.class) || !diagonalLineAhead(current, dir, 3)) {
-            return;
-        }
-        behavior.baritone.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
-        behavior.sprintJumpAlong(dir);
-        lookAlongHop(dir);
-        sprintJumpCarry = true;
-        sprintJumpHolding = true;
-    }
-
-    private void sprintJumpOffDescend(IMovement current) {
-        if (!alignedToMove(current)) {
-            return; // drifting sideways while hopping off an edge would be bad
-        }
-        if (current.getDirection().getY() < -2) {
-            return; // only hop down the little 1-2 block drops, we're not here to take fall damage
-        }
-        if (!ctx.player().isOnGround() || !ctx.playerFeet().equals(current.getSrc())) {
-            return; // hop off the edge at the start of the descend, not halfway through it
-        }
-        BlockPos dir = current.getDirection().above(); // the flat direction we're heading
-        // only when it flattens out or steps down straight ahead, hopping off into a turn would yeet us
-        if (!Baritone.settings().overshootTraverse.value
-                || !(straightChainAhead(dir, 5, MovementTraverse.class) || downhillChainAhead(dir, 5))
-                || !(floorAhead(current.getDest(), dir, 6) || floorAheadDownhill(6))) {
-            return;
-        }
-        behavior.baritone.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
-        behavior.sprintJumpAlong(dir);
-        lookAlongHop(dir);
-        sprintJumpCarry = true;
-        sprintJumpHolding = true;
-    }
-
-    /**
-     * While hopping, aim the look along the hop direction. The W thrust follows the client yaw, so if the
-     * movement's look target snapped backward at us (it does when we overshoot its dest mid chain) the
-     * thrust would brake instead of steer. There's nothing to interact with mid chain, so the rotation is
-     * free to steer momentum instead.
-     */
-    private void lookAlongHop(BlockPos dir) {
-        BlockPos lookAt = ctx.playerFeet().offset(dir.getX() * 2, 0, dir.getZ() * 2);
-        behavior.baritone.getLookBehavior().updateTarget(
-                RotationUtils.calcRotationFromVec3d(ctx.playerHead(), VecUtils.getBlockPosCenter(lookAt), ctx.playerRotations()),
-                false);
-    }
-
-    private boolean straightChainAhead(BlockPos dir, int count, Class<? extends IMovement> type) {
-        if (pathPosition + count >= path.movements().size()) {
-            return false; // not enough straight path left to land on
-        }
-        for (int i = 1; i <= count; i++) {
-            IMovement next = path.movements().get(pathPosition + i);
-            if (!type.isInstance(next) || !next.getDirection().equals(dir)) {
-                return false; // a sprint jump carries several blocks, only hop when the path continues straight
-            }
-        }
+        sprintJump.start(plan.direction, ctx.playerRotations().getPitch());
         return true;
     }
 
-    private boolean downhillChainAhead(BlockPos dir, int count) {
-        // like straightChainAhead, but the path may step down a block or two at a time, for hopping down
-        // slight hills instead of stopping at the edge of every drop. a hop chain can't steer, so the
-        // hill has to keep going the same way, and the drops have to stay in fall damage free territory
-        if (pathPosition + count >= path.movements().size()) {
+    private SprintJumpPlan findSprintJump(IMovement current) {
+        if (!ctx.player().isOnGround() || ctx.player().isInWater() || ctx.player().onClimbable()
+                || ctx.player().horizontalCollision || ctx.player().isCrouching() || ctx.player().isPassenger()
+                || ctx.player().getAbilities().flying || ctx.player().getBbWidth() > 0.6F || ctx.player().getBbHeight() > 1.8F
+                || !Baritone.settings().allowSprint.value || ctx.player().getFoodData().getFoodLevel() <= 6
+                || !Baritone.settings().overshootTraverse.value || hasInteractionInput()
+                || ((Movement) current).isTargetingBlock()
+                || !behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.MOVE_FORWARD)) {
+            return null;
+        }
+        // these change flight time/height; the normal movements still work, but our runway estimate doesn't.
+        if (ctx.player().hasEffect(MobEffects.JUMP) || ctx.player().hasEffect(MobEffects.SLOW_FALLING)
+                || ctx.player().hasEffect(MobEffects.LEVITATION)) {
+            return null;
+        }
+        boolean diagonal = current instanceof MovementDiagonal && current.getDirection().getY() == 0;
+        boolean descend = current instanceof MovementDescend && current.getDirection().getY() == -1;
+        if (!(current instanceof MovementTraverse || diagonal || descend)) {
+            return null;
+        }
+        if (descend && ((MovementDescend) current).safeMode()) {
+            return null;
+        }
+        BlockStateInterface bsi = behavior.baritone.bsi;
+        BlockPos ceilingPos = ctx.playerFeet().above(2);
+        boolean ceiling = bsi.get0(ceilingPos).isCollisionShapeFullBlock(bsi.access, ceilingPos);
+        if (diagonal && !Baritone.settings().sprintJumpOnDiagonals.value
+                || descend && !Baritone.settings().sprintJumpDescend.value
+                || ceiling && !Baritone.settings().headHitters.value
+                || !ceiling && current instanceof MovementTraverse && !Baritone.settings().sprintJump.value) {
+            return null;
+        }
+        Rotation desired = SprintJumpFlight.rotation(current.getDirection(), ctx.playerRotations().getPitch());
+        Rotation actual = behavior.baritone.getLookBehavior().getAimProcessor().peekRotation(desired);
+        if (Math.abs(Rotation.normalizeYaw(actual.getYaw() - desired.getYaw())) > 5) {
+            return null; // let ground steering align before committing the sprint boost
+        }
+        double acceleration = ctx.player().getAttributeValue(Attributes.MOVEMENT_SPEED);
+        if (!ctx.player().isSprinting()) {
+            acceleration *= 1.3;
+        }
+        boolean downhill = Baritone.settings().sprintJumpDescend.value && !diagonal;
+        return SprintJumpPlan.find(path.positions(), pathPosition, ctx.player().position(),
+                ctx.player().getDeltaMovement(), acceleration, ceiling, downhill, i -> {
+                    Movement next = (Movement) path.movements().get(i);
+                    if (!(next instanceof MovementTraverse || next instanceof MovementDiagonal
+                            || downhill && next instanceof MovementDescend)) {
+                        return false;
+                    }
+                    next.resetBlockCache();
+                    return next.toBreak(bsi).isEmpty() && next.toPlace(bsi).isEmpty() && next.toWalkInto(bsi).isEmpty();
+                }, (pos, topY) -> clearJumpColumn(bsi, pos, topY, ceiling));
+    }
+
+    private boolean clearJumpColumn(BlockStateInterface bsi, BlockPos pos, int topY, boolean ceiling) {
+        if (!clearSmoothingColumn(bsi, pos) || bsi.get0(pos.below()).getBlock().getFriction() != 0.6F) {
             return false;
         }
-        int drop = 0;
-        for (int i = 1; i <= count; i++) {
-            IMovement next = path.movements().get(pathPosition + i);
-            BlockPos nextDir = next.getDirection();
-            if (!(next instanceof MovementTraverse || next instanceof MovementDescend)) {
+        for (int y = pos.getY() + 2; y <= topY; y++) {
+            BlockPos body = new BlockPos(pos.getX(), y, pos.getZ());
+            BlockState state = bsi.get0(body);
+            if (MovementHelper.avoidWalkingInto(state) || MovementHelper.isClimbable(state.getBlock())
+                    || state.is(Blocks.WITHER_ROSE) || state.is(Blocks.POWDER_SNOW)
+                    || !state.getCollisionShape(bsi.access, body).isEmpty()) {
                 return false;
             }
-            if (nextDir.getX() != dir.getX() || nextDir.getZ() != dir.getZ()) {
-                return false; // the hill turns, hops can't steer
-            }
-            if (nextDir.getY() < -2) {
-                return false; // no single step deeper than 2 blocks
-            }
-            drop += nextDir.getY();
         }
-        return drop >= -3; // and the whole window can't stack up to a big fall either
+        if (!ceiling) {
+            return true;
+        }
+        BlockPos overhead = pos.above(2);
+        BlockState state = bsi.get0(overhead);
+        return state.isCollisionShapeFullBlock(bsi.access, overhead) && !MovementHelper.avoidWalkingInto(state);
     }
 
-    private boolean diagonalLineAhead(IMovement current, BlockPos dir, int steps) {
-        // a hop can't steer, so everything along the diagonal line we'd fly over needs open corners and floor
-        BlockPos src = current.getSrc();
-        for (int i = 1; i <= steps; i++) {
-            BlockPos main = src.offset(dir.getX() * i, 0, dir.getZ() * i);
-            BlockPos cornerA = main.offset(0, 0, -dir.getZ());
-            BlockPos cornerB = main.offset(-dir.getX(), 0, 0);
-            for (BlockPos pos : new BlockPos[]{main, cornerA, cornerB}) {
-                if (!MovementHelper.fullyPassable(ctx, pos) || !MovementHelper.fullyPassable(ctx, pos.above())) {
-                    return false; // a wall or a corner we'd have to edge around, we'd clip it mid air
-                }
-                if (!MovementHelper.canWalkOn(ctx, pos.below())) {
-                    return false; // no floor where our momentum would take us
-                }
-            }
-        }
-        return true;
+    private boolean hasInteractionInput() {
+        return behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.SNEAK)
+                || behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
+                || behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.CLICK_RIGHT);
     }
 
-    private boolean floorAhead(BlockPos start, BlockPos dir, int count) {
-        for (int i = 1; i <= count; i++) {
-            if (!MovementHelper.canWalkOn(ctx, start.offset(dir.getX() * i, 0, dir.getZ() * i).below())) {
-                return false; // no floor where our momentum would take us
-            }
-        }
-        return true;
-    }
-
-    private boolean floorAheadDownhill(int count) {
-        // like floorAhead, but the floor may step down a block or two along the way, so judge each step
-        // by the path's own landing block instead of assuming it stays level
-        if (pathPosition + count >= path.movements().size()) {
-            return false;
-        }
-        for (int i = 1; i <= count; i++) {
-            if (!MovementHelper.canWalkOn(ctx, path.movements().get(pathPosition + i).getDest().below())) {
-                return false; // no floor where our momentum would take us
-            }
-        }
-        return true;
-    }
-
-    private boolean underHeadBonkCeiling(BlockPos dir, BetterBlockPos feet) {
-        if (MovementHelper.fullyPassable(ctx, feet.above(2))) {
-            return false; // not under a ceiling yet; jumping now would bonk on the face of the ceiling block ahead and stop us
-        }
-        return headClearOfEntrance(dir, feet);
-    }
-
-    private boolean headClearOfEntrance(BlockPos dir, BlockPos feet) {
-        // make sure we're fully inside the corridor before we start jumping, same idea as skipNow
-        BlockPos behind = feet.subtract(dir).above(2);
-        if (MovementHelper.fullyPassable(ctx, behind)) {
-            double flatDist = Math.abs(dir.getX() * (behind.getX() + 0.5D - ctx.player().position().x)) + Math.abs(dir.getZ() * (behind.getZ() + 0.5D - ctx.player().position().z));
-            return flatDist >= 0.8; // just entered, wait until we're clear of the entrance face
-        }
-        return true;
-    }
-
-    private boolean headroomForJump(BlockPos dir, BetterBlockPos feet, int blocks) {
-        // a hop rises ~1.25 blocks so the ceiling over the whole flight has to be uniform: either all open, or
-        // all solid with our hitbox fully past the entrance face so we only ever bonk straight up
-        boolean underCeiling = !MovementHelper.fullyPassable(ctx, feet.above(2));
-        for (int i = 1; i <= blocks; i++) {
-            if (MovementHelper.fullyPassable(ctx, feet.offset(dir.getX() * i, 0, dir.getZ() * i).above(2)) == underCeiling) {
-                return false; // the ceiling starts or ends mid flight, we'd bonk on its face and stop dead
-            }
-        }
-        return !underCeiling || headClearOfEntrance(dir, feet);
-    }
-
-    private boolean clearOfLedgesAhead(IMovement current, BlockPos dir) {
-        // momentum from the head bonk can carry us an extra block or two, so don't headhit when there's a ledge or
-        // dropoff ahead, e.g. when the goal is right next to one
-        if (pathPosition < path.length() - 2 && path.movements().get(pathPosition + 1).getDirection().getY() < 0) {
-            return false; // the path goes down right after this movement, don't add any momentum
-        }
-        BetterBlockPos dest = current.getDest();
-        for (int i = 1; i <= 2; i++) {
-            if (!MovementHelper.canWalkOn(ctx, dest.offset(dir.getX() * i, 0, dir.getZ() * i).below())) {
-                return false; // no floor where our momentum would take us
-            }
-        }
-        return true;
+    private void endSprintJump() {
+        sprintJump.clear();
+        behavior.clearSprintJumpYaw();
     }
 
     private Tuple<Vec3, BlockPos> overrideFall(MovementFall movement) {
@@ -1100,6 +873,7 @@ public class PathExecutor implements IPathExecutor, Helper {
     }
 
     private void cancel() {
+        endSprintJump();
         groundShortcut = null;
         sprintNextTick = false;
         clearKeys();
@@ -1131,6 +905,8 @@ public class PathExecutor implements IPathExecutor, Helper {
             ret.currentMovementOriginalCostEstimate = currentMovementOriginalCostEstimate;
             ret.costEstimateIndex = costEstimateIndex;
             ret.ticksOnCurrent = ticksOnCurrent;
+            ret.sprintJump.copyFrom(sprintJump);
+            ret.sprintNextTick = sprintNextTick;
             return ret;
         }).orElseGet(this::cutIfTooLong); // dont actually call cutIfTooLong every tick if we won't actually use it, use a method reference
     }
@@ -1152,6 +928,8 @@ public class PathExecutor implements IPathExecutor, Helper {
                 ret.costEstimateIndex = costEstimateIndex - cutoffAmt;
             }
             ret.ticksOnCurrent = ticksOnCurrent;
+            ret.sprintJump.copyFrom(sprintJump);
+            ret.sprintNextTick = sprintNextTick;
             return ret;
         }
         return this;

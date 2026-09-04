@@ -29,6 +29,7 @@ import baritone.api.utils.BetterBlockPos;
 import baritone.api.utils.Helper;
 import baritone.api.utils.PathCalculationResult;
 import baritone.api.utils.interfaces.IGoalRenderPos;
+import baritone.api.utils.input.Input;
 import baritone.pathing.calc.AStarPathFinder;
 import baritone.pathing.calc.AbstractNodeCostSearch;
 import baritone.pathing.movement.CalculationContext;
@@ -109,6 +110,7 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
 
     @Override
     public void onTick(TickEvent event) {
+        clearSprintJumpYaw();
         dispatchEvents();
         if (event.getType() == TickEvent.Type.OUT) {
             secretInternalSegmentCancel();
@@ -121,21 +123,22 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
         tickPath();
         ticksElapsedSoFar++;
         dispatchEvents();
-        if (event.getState() == EventState.POST) {
-            // the hop yaw armed this tick was consumed by the aiStep that just ran. clear it so a jump
-            // taken after pathing ends never inherits a stale boost direction; the hop chain re-arms it
-            // every tick while it's active
-            sprintJumpYawActive = false;
-        }
+    }
+
+    @Override
+    public void onPostTick(TickEvent event) {
+        // POST is delivered to onPostTick, not onTick. the old cleanup never actually ran.
+        clearSprintJumpYaw();
     }
 
     @Override
     public void onPlayerSprintState(SprintStateEvent event) {
         if (isPathing()) {
             boolean sprinting = current != null && current.isSprinting();
-            if (!sprinting && sprintSticky && !baritone.getPlayerContext().player().isOnGround()) {
+            if (!sprinting && sprintSticky && !ctx.player().isOnGround() && canSprintNow()) {
                 sprinting = true; // still airborne from a jump, don't drop sprint
             }
+            sprinting &= canSprintNow();
             sprintSticky = sprinting;
             event.setState(sprinting);
         } else {
@@ -151,7 +154,9 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
         this.sprintJumpYawActive = true;
         // a bonk shortened hop can land before vanilla's 10 tick jump cooldown expires, which would stall
         // the next hop in the chain, so clear it whenever we're about to hop
-        ((ILivingEntity) ctx.player()).setNoJumpDelay(0);
+        if (ctx.player().isOnGround()) {
+            ((ILivingEntity) ctx.player()).setNoJumpDelay(0);
+        }
     }
 
     public void clearSprintJumpYaw() {
@@ -160,13 +165,18 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
 
     @Override
     public void onPlayerRotationMove(RotationMoveEvent event) {
-        if (event.getType() == RotationMoveEvent.Type.JUMP && sprintJumpYawActive) {
+        if (event.getType() == RotationMoveEvent.Type.JUMP && sprintJumpYawActive && isPathing()
+                && !pausedThisTick && canSprintNow() && baritone.getInputOverrideHandler().isInputForcedDown(Input.JUMP)) {
             event.setYaw(sprintJumpYaw);
             // vanilla drops sprint on the landing collision right before aiStep re-jumps us, which
             // kills the sprint jump boost exactly when we need it most, so re-assert it here at the
             // head of jumpFromGround, before the boost reads isSprinting()
             ctx.player().setSprinting(true);
         }
+    }
+
+    private boolean canSprintNow() {
+        return Baritone.settings().allowSprint.value && ctx.player().getFoodData().getFoodLevel() > 6;
     }
 
     private void tickPath() {
@@ -298,7 +308,7 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
                     ctx.minecraft().options.autoJump().set(false);
                     // this runs right after aiStep and right before the sprint state syncs to the server, so
                     // re-asserting here undoes anything vanilla dropped mid air without the server ever seeing it
-                    if (sprintSticky && !ctx.player().isOnGround() && !ctx.player().isSprinting()) {
+                    if (sprintSticky && canSprintNow() && !ctx.player().isOnGround() && !ctx.player().isSprinting()) {
                         ctx.player().setSprinting(true);
                     }
                     break;
