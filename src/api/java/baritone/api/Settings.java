@@ -417,6 +417,15 @@ public final class Settings {
     public final Setting<Boolean> overshootTraverse = new Setting<>(true);
 
     /**
+     * Prefer paths and steering that preserve walking and sprinting momentum. Enabled by default.
+     * <p>
+     * Look ahead along clear, supported straight runs instead of steering at each block center.
+     * Diagonals that require edging around an obstacle receive an extra cost; open diagonals keep
+     * their normal cost. Turns, terrain changes, and block interactions retain precise steering.
+     */
+    public final Setting<Boolean> preferFasterPathing = new Setting<>(true);
+
+    /**
      * When breaking blocks for a movement, wait until all falling blocks have settled before continuing
      */
     public final Setting<Boolean> pauseMiningForFallingBlocks = new Setting<>(true);

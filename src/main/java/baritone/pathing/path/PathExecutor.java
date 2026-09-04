@@ -38,6 +38,7 @@ import net.minecraft.core.Vec3i;
 import net.minecraft.util.Tuple;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 import java.util.*;
 
@@ -52,6 +53,8 @@ public class PathExecutor implements IPathExecutor, Helper {
 
     private static final double MAX_MAX_DIST_FROM_PATH = 3;
     private static final double MAX_DIST_FROM_PATH = 2;
+    private static final Input[] PRECISE_STEERING_INPUTS = {Input.CLICK_LEFT, Input.CLICK_RIGHT,
+            Input.SNEAK, Input.JUMP, Input.MOVE_BACK, Input.MOVE_LEFT, Input.MOVE_RIGHT};
 
     /**
      * Default value is equal to 10 seconds. It's find to decrease it, but it must be at least 5.5s (110 ticks).
@@ -258,6 +261,9 @@ public class PathExecutor implements IPathExecutor, Helper {
             onTick();
             return true;
         } else {
+            if (movementStatus == RUNNING) {
+                smoothSteering(movement, bsi);
+            }
             sprintNextTick = shouldSprintNextTick();
             if (!sprintNextTick && ctx.player().isOnGround()) {
                 ctx.player().setSprinting(false); // letting go of control doesn't make you stop sprinting actually
@@ -275,6 +281,57 @@ public class PathExecutor implements IPathExecutor, Helper {
             }
         }
         return canCancel; // movement is in progress, but if it reports cancellable, PathingBehavior is good to cut onto the next path
+    }
+
+    private void smoothSteering(Movement movement, BlockStateInterface bsi) {
+        if (!Baritone.settings().preferFasterPathing.value || !ctx.player().isOnGround()
+                || ctx.player().isInWater() || ctx.player().onClimbable() || ctx.player().horizontalCollision
+                || movement.isTargetingBlock() || sprintJumpCarry || sprintJumpHolding) {
+            return;
+        }
+        if (!behavior.baritone.getInputOverrideHandler().isInputForcedDown(Input.MOVE_FORWARD)) {
+            return;
+        }
+        for (Input input : PRECISE_STEERING_INPUTS) {
+            if (behavior.baritone.getInputOverrideHandler().isInputForcedDown(input)) {
+                return;
+            }
+        }
+        Vec3 target = PathSmoothing.lookAhead(path.positions(), pathPosition, ctx.player().position(), i -> {
+            IMovement next = path.movements().get(i);
+            return next instanceof MovementTraverse || next instanceof MovementDiagonal;
+        }, pos -> clearSmoothingColumn(bsi, pos));
+        if (target != null) {
+            behavior.baritone.getLookBehavior().updateTarget(
+                    RotationUtils.calcRotationFromVec3d(ctx.playerHead(), target, ctx.playerRotations())
+                            .withPitch(ctx.playerRotations().getPitch()), false);
+        }
+    }
+
+    private boolean clearSmoothingColumn(BlockStateInterface bsi, BlockPos pos) {
+        if (!bsi.worldContainsLoadedChunk(pos.getX(), pos.getZ())) {
+            return false;
+        }
+        BlockPos floor = pos.below();
+        BlockState support = bsi.get0(floor);
+        Block block = support.getBlock();
+        if (!support.getFluidState().isEmpty() || !support.isCollisionShapeFullBlock(bsi.access, floor)
+                || !MovementHelper.canWalkOn(bsi, floor.getX(), floor.getY(), floor.getZ(), support)
+                || block == Blocks.MAGMA_BLOCK || block == Blocks.ICE || block == Blocks.PACKED_ICE
+                || block == Blocks.BLUE_ICE || block == Blocks.FROSTED_ICE
+                || block == Blocks.SLIME_BLOCK || block == Blocks.HONEY_BLOCK) {
+            return false;
+        }
+        for (int y = 0; y < 2; y++) {
+            BlockPos body = pos.above(y);
+            BlockState state = bsi.get0(body);
+            if (MovementHelper.avoidWalkingInto(state) || state.is(Blocks.WITHER_ROSE)
+                    || state.is(Blocks.POWDER_SNOW) || MovementHelper.isClimbable(state.getBlock())
+                    || !state.getCollisionShape(bsi.access, body).isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private Tuple<Double, BlockPos> closestPathPos(IPath path) {

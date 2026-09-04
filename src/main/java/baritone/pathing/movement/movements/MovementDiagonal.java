@@ -48,6 +48,12 @@ public class MovementDiagonal extends Movement {
 
     private static final double SQRT_2 = Math.sqrt(2);
 
+    /**
+     * Edging needs steering corrections and loses momentum. Open diagonals don't, so only charge
+     * this overhead when one of the two corner columns is obstructed.
+     */
+    private static final double CORNER_EDGING_PENALTY = 1.2;
+
     public MovementDiagonal(IBaritone baritone, BetterBlockPos start, Direction dir1, Direction dir2, int dy) {
         this(baritone, start, start.relative(dir1), start.relative(dir2), dir2, dy);
         // super(start, start.offset(dir1).offset(dir2), new BlockPos[]{start.offset(dir1), start.offset(dir1).up(), start.offset(dir2), start.offset(dir2).up(), start.offset(dir1).offset(dir2), start.offset(dir1).offset(dir2).up()}, new BlockPos[]{start.offset(dir1).offset(dir2).down()});
@@ -248,6 +254,9 @@ public class MovementDiagonal extends Movement {
         }
         if (optionA != 0 || optionB != 0) {
             multiplier *= SQRT_2 - 0.001; // TODO tune
+            if (context.preferFasterPathing) {
+                multiplier *= CORNER_EDGING_PENALTY;
+            }
             if (MovementHelper.isClimbable(startIn)) {
                 // edging around doesn't work if doing so would climb a ladder or vine instead of moving sideways
                 return;

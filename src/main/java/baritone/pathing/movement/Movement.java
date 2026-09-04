@@ -114,6 +114,10 @@ public abstract class Movement implements IMovement, MovementHelper {
         return getValidPositions().contains(ctx.playerFeet()) || getValidPositions().contains(((PathingBehavior) baritone.getPathingBehavior()).pathStart());
     }
 
+    public boolean isTargetingBlock() {
+        return currentState.getTarget().hasToForceRotations();
+    }
+
     /**
      * Handles the execution of the latest Movement
      * State, and offers a Status to the calling class.

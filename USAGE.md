@@ -71,6 +71,7 @@ There are about a hundred settings, but here are some fun / interesting / import
 
 - `allowBreak`
 - `allowSprint`
+- `preferFasterPathing` (enabled by default: smoother steering along clear straight runs and fewer awkward corner-edging shortcuts; toggle with `#preferFasterPathing true` / `false`)
 - `allowPlace`
 - `allowParkour`
 - `allowParkourPlace`
