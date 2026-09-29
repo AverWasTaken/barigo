@@ -1,0 +1,14 @@
+allprojects {
+    afterEvaluate {
+        if (project == rootProject) {
+            tasks.register('pathingCacheClasspath') {
+                dependsOn 'compileJava', 'compileApiJava', 'compileTestJava', 'processTestResources'
+                doLast {
+                    def target = project.file('build/pathing-cache/runtime-classpath.txt')
+                    target.parentFile.mkdirs()
+                    target.text = project.sourceSets.test.runtimeClasspath.asPath
+                }
+            }
+        }
+    }
+}
